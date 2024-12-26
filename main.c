@@ -4,16 +4,10 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <fcntl.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/termios.h>
-#include <sys/mman.h>
 
-// Memory Storage
-#define MEMORY_MAX (1 << 16) uint16_t memory[MEMORY_MAX]; /*65536 locations*/
-
-// Registers
 enum {
     R_R0 = 0,
     R_R1,
@@ -55,6 +49,13 @@ enum {
     OP_TRAP /* execute trap */
 };
 
+// Memory Mapped Registers
+enum {
+    MR_KBSR = 0xFE00, /* keyboard status*/
+    MR_KBDR = 0xFE02 /* keyboard data */
+};
+
+// TRAP codes
 enum {
     TRAP_GETC = 0x20, /* get character from keyboard, not echoed onto the terminal*/
     TRAP_OUT = 0x21, /* output a character */
@@ -64,9 +65,29 @@ enum {
     TRAP_HALT = 0x25 /* halt the program */
 };
 
+// Memory Storage
+#define MEMORY_MAX (1 << 16)
+uint16_t memory[MEMORY_MAX]; /*65536 locations*/
+
 // Register Storage
 uint16_t reg[R_COUNT];
 
+
+// Input Buffering
+struct termios original_tio;
+
+void disable_input_buffering() {
+    tcgetattr(STDIN_FILENO, &original_tio);
+    struct termios new_tio = original_tio;
+    new_tio.c_lflag &= ~ICANON & ~ECHO;
+    tcsetattr(STDIN_FILENO, TCSANOW, &new_tio);
+}
+
+void restore_input_buffering() {
+    tcsetattr(STDIN_FILENO, TCSANOW, &original_tio);
+}
+
+// Handle interrupt
 void handle_interrupt(int signal) {
     restore_input_buffering();
     printf("\n");
@@ -104,7 +125,7 @@ void read_image_file(FILE *file) {
 
     /* we know the maximum file size so we only need one fread */
     uint16_t max_read = MEMORY_MAX
-    -origin;
+                        - origin;
     uint16_t *p = memory + origin;
     size_t read = fread(p, sizeof(uint16_t), max_read, file);
 
@@ -122,12 +143,42 @@ int read_image(const char *image_path) {
     return 1;
 }
 
+
+void mem_write(uint16_t address, uint16_t val) {
+    memory[address] = val;
+}
+
+
+uint16_t check_key() {
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(STDIN_FILENO, &readfds);
+
+    struct timeval timeout;
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 0;
+    return select(1, &readfds, NULL, NULL, &timeout) != 0;
+}
+
+uint16_t mem_read(uint16_t address) {
+    if (address == MR_KBSR) {
+        if (check_key()) {
+            memory[MR_KBSR] = (1 << 15);
+            memory[MR_KBDR] = getchar();
+        } else {
+            memory[MR_KBSR] = 0;
+        }
+    }
+    return memory[address];
+}
+
+
 int main(int argc, const char *argv[]) {
     signal(SIGINT, handle_interrupt);
     disable_input_buffering();
 
     if (argc < 2) {
-        printf("main [image-file1...\n]");
+        printf("main [image-file1...]\n");
         exit(2);
     }
 
@@ -233,7 +284,7 @@ int main(int argc, const char *argv[]) {
             case OP_LDI: {
                 /* destination register */
                 uint16_t r0 = (instr >> 9) & 0x7;
-                /* PCoffset 9 */
+                /* PC offset 9 */
                 uint16_t pc_offset = sign_extend(instr & 0x1FF, 9);
                 /* add pc_offset to the current PC , look at that memory location to get the final address */
                 reg[r0] = mem_read(mem_read(reg[R_PC] + pc_offset));
@@ -320,7 +371,7 @@ int main(int argc, const char *argv[]) {
                             if (char2) putc(char2, stdout);
                             ++c;
                         }
-                        fflush(stdout)
+                        fflush(stdout);
                     }
                     break;
                     case TRAP_HALT: {
@@ -334,7 +385,6 @@ int main(int argc, const char *argv[]) {
             break;
             case OP_RES:
                 abort();
-                break;
             case OP_RTI:
                 abort();
             default:
