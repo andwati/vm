@@ -1,1 +1,1 @@
-# virtual machine in C
+# LC3 vm
